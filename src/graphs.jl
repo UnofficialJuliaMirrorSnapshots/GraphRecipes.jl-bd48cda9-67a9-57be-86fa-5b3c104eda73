@@ -190,8 +190,12 @@ function get_source_destiny_weight(g::LightGraphs.AbstractGraph)
     get_source_destiny_weight(source, destiny)
 end
 
-function get_adjacency_matrix(g::LightGraphs.Graph)
-    get_adjacency_matrix(get_source_destiny_weight(g)...)
+function get_adjacency_matrix(g::LightGraphs.AbstractGraph)
+    adjacency_matrix(g)
+end
+
+function get_adjacency_matrix(source::AbstractVector{Int}, destiny::AbstractVector{Int})
+    get_adjacency_matrix(source, destiny, ones(length(source)))
 end
 
 function get_adjacency_list(g::LightGraphs.AbstractGraph)
@@ -213,7 +217,7 @@ end
                    free_dims = nothing,
                    T = Float64,
                    curves = true,
-                   curvature_scalar = 0.2,
+                   curvature_scalar = 0.05,
                    root = :top,
                    node_weights = nothing,
                    names = [],
@@ -232,9 +236,12 @@ end
                    edgewidth = (s,d,w)->1,
                    edgelabel = nothing,
                    edgelabel_offset = 0.0,
+                   self_edge_size = 0.1,
                   )
     @assert dim in (2, 3)
     _3d = dim == 3
+    adj_mat = get_adjacency_matrix(g.args...)
+    isdirected = (g.args[1] isa DiGraph || !issymmetric(adj_mat)) && !in(method, (:tree, :buchheim))
 
     source, destiny, weights = get_source_destiny_weight(g.args...)
     if !(eltype(source) <: Integer)
@@ -335,7 +342,7 @@ end
             nodewidth_array[i] = nodewidth
             if nodeshape == :circle
                 push!(node_vec_vec_xy, partialcircle(0, 2π, [x[i], y[i]],
-                                                     80, nodewidth))
+                                                     80, nodewidth/2))
             elseif (nodeshape == :rect) || (nodeshape == :rectangle)
                 push!(node_vec_vec_xy, [(xextent[1],yextent[1]),
                                         (xextent[2],yextent[1]),
@@ -344,7 +351,7 @@ end
                                         (xextent[1],yextent[1])])
             elseif nodeshape == :hexagon
                 push!(node_vec_vec_xy, partialcircle(0, 2π, [x[i], y[i]],
-                                                     7, nodewidth))
+                                                     7, nodewidth/2))
             elseif nodeshape == :ellipse
                 nodeheight = (yextent[2] - yextent[1])
                 push!(node_vec_vec_xy, partialellipse(0, 2π, [x[i], y[i]],
@@ -376,7 +383,12 @@ end
             end
             edgelabel = tmp
         end
+        edge_has_been_seen = Dict()
+        for edge in zip(source, destiny)
+            edge_has_been_seen[edge] = 0
+        end
         for (i, (si, di, wi)) in enumerate(zip(source, destiny, weights))
+            edge_has_been_seen[(si, di)] += 1
             @series begin
                 xseg = Vector{Float64}()
                 yseg = Vector{Float64}()
@@ -388,12 +400,20 @@ end
                 xsi, ysi, xdi, ydi = shorten_segment(x[si], y[si], x[di], y[di], shorten)
                 # For directed graphs, shorten the line segment so that the edge ends at
                 # the perimeter of the destiny node.
-                if (g.args[1] isa DiGraph && nodeshape == :circle)
-                    xsi, ysi, xdi, ydi = shorten_segment_absolute(x[si], y[si], x[di],
-                                                                  y[di], nodewidth_array[di])
-                elseif g.args[1] isa DiGraph
-                    xsi, ysi, xdi, ydi = nearest_intersection(x[si], y[si], x[di], y[di],
-                                                              node_vec_vec_xy[di])
+                θ = (edge_has_been_seen[(si, di)] - 1)*pi/8
+                if isdirected && si != di
+                    α = atan(y[si] - y[di], x[si] - x[di])
+                    if sign(si - di) < 0
+                        α = x[si] < x[di] ? θ + α : α - θ
+                    else
+                        α = x[si] > x[di] ? θ + α : α - θ
+                    end
+                    xdi = x[di] + nodewidth_array[di]*cos(α)/2
+                    ydi = y[di] + nodewidth_array[di]*sin(α)/2
+                    if nodeshape != :circle
+                        xsi, ysi, xdi, ydi = nearest_intersection(x[si], y[si], xdi, ydi,
+                                                                  node_vec_vec_xy[di])
+                    end
                 end
                 if curves
                     if method in (:tree, :buchheim)
@@ -429,7 +449,7 @@ end
                         xpt, ypt = if method != :chorddiagram
                             control_point(xsi, xdi,
                                           ysi, ydi,
-                                          curvature_scalar*sign(si - di))
+                                          edge_has_been_seen[(si, di)]*curvature_scalar*sign(si - di))
                         else
                             (0.0, 0.0)
                         end
@@ -442,7 +462,48 @@ end
                     push!(xseg, xsi, xdi, NaN)
                     push!(yseg, ysi, ydi, NaN)
                     _3d && push!(zseg, z[si], z[di], NaN)
-                    push!(l_wg, wi)
+                end
+            if si == di
+                inds = 1:n .!= si
+                self_edge_angle = pi/8 + (edge_has_been_seen[(si, di)] - 1)*pi/8
+                θ1 = unoccupied_angle(xsi, ysi, x[inds], y[inds]) - self_edge_angle/2
+                θ2 = θ1 + self_edge_angle
+                nodewidth = nodewidth_array[si]
+                if nodeshape == :circle
+                    xpts = [xsi + nodewidth*cos(θ1)/2,
+                            xsi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*cos(θ1),
+                            xsi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*cos(θ2),
+                            xsi + nodewidth*cos(θ2)/2]
+                    ypts = [ysi + nodewidth*sin(θ1)/2,
+                            ysi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*sin(θ1),
+                            ysi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*sin(θ2),
+                            ysi + nodewidth*sin(θ2)/2]
+
+                else
+                    _, _,
+                    start_point1,
+                    start_point2 = nearest_intersection(xsi, ysi,
+                                                        xsi + 2nodewidth*cos(θ1),
+                                                        ysi + 2nodewidth*sin(θ1),
+                                                        node_vec_vec_xy[si])
+                    _, _, end_point1,
+                    end_point2 = nearest_intersection(xsi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*cos(θ2),
+                                                      ysi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*sin(θ2),
+                                                      xsi,
+                                                      ysi,
+                                                      node_vec_vec_xy[si])
+
+                    xpts = [start_point1,
+                            xsi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*cos(θ1),
+                            xsi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*cos(θ2),
+                            end_point1]
+                    ypts = [start_point2,
+                            ysi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*sin(θ1),
+                            ysi + edge_has_been_seen[(si, di)]*(nodewidth + self_edge_size)*sin(θ2),
+                            end_point2]
+                end
+                append!(xseg, push!(xpts, NaN))
+                append!(yseg, push!(ypts, NaN))
             end
             if !isnothing(edgelabel) && haskey(edgelabel, (si, di))
                 @assert !_3d  # TODO: make this work in 3D
@@ -456,11 +517,23 @@ end
                 line_z := segment_colors[i]
             end
             linewidthattr = get(plotattributes, :linewidth, 1)
-            seriestype := (curves ? :curves : (_3d ? :path3d : :path))
+            seriestype := if si == di
+                :curves
+            else
+                if curves
+                    :curves
+                else
+                    if _3d
+                        :path3d
+                    else
+                        :path
+                    end
+                end
+            end
             linewidth --> linewidthattr * edgewidth(si, di, wi)
             markershape := :none
             markercolor := :black
-            (g.args[1] isa DiGraph) && (arrow --> :simple, :head, 0.3, 0.3)
+            isdirected && (arrow --> :simple, :head, 0.3, 0.3)
             primary := false
             _3d ? (xseg, yseg, zseg) : (xseg, yseg)
             end
@@ -471,7 +544,6 @@ end
     framestyle := :none
     axis := nothing
     legend --> false
-
     if method == :chorddiagram
         seriestype := :scatter
         markersize := 0
